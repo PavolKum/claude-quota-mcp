@@ -47,9 +47,13 @@ Weekend polish (Pavol + agent):
 - [ ] Dogfood the opportunity signal once for real (low usage + near reset)
 - [ ] Test quota tool FROM Codex (restart Codex CLI, ask it to check its own
       quota; also confirm which windows appear on plans with a 5h primary)
-- [ ] Extend quota-guard hook triggers to the codex provider (Codex hooks.json)
+- [x] Extend quota-guard hook triggers to the codex provider (done 2026-07-18:
+      hook.py gained --provider=codex / QUOTA_HOOK_PROVIDER + --time-always;
+      registered in ~/.codex/hooks.json on SessionStart + UserPromptSubmit via
+      the Stack-deployed wrapper; snapshot age surfaced, day-scale reset format)
 - [ ] Decide final name (claude-quota-mcp vs alternatives) BEFORE first push
-- [ ] git init, first commit, create GitHub repo (public)
+- [x] git init, first commit (2026-07-18); GitHub repo creation still pending
+      (name decision first)
 - [ ] Publish to PyPI (needs account/token) so `uvx claude-quota-mcp` works
 - [ ] Verify install path end-to-end on a clean environment: `claude mcp add quota -- uvx claude-quota-mcp`
 

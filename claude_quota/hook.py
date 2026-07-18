@@ -35,6 +35,7 @@ import sys
 import tempfile
 import time
 
+from claude_quota.codex import codex_quota_status
 from claude_quota.quota import quota_status
 
 WARN_PERCENT = float(os.environ.get("QUOTA_HOOK_WARN_PERCENT", "70"))
@@ -78,6 +79,8 @@ def _save_state(session_id, state):
 def _fmt_reset(minutes):
     if not isinstance(minutes, int):
         return "?"
+    if minutes >= 2880:
+        return f"{minutes // 1440}d {(minutes % 1440) // 60}h"
     return f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
 
 
@@ -123,42 +126,13 @@ def _analyze(limits):
     return alerts, opportunity, session
 
 
-def main():
-    event = ""
-    session_id = ""
-    raw = sys.stdin.read() if not sys.stdin.isatty() else ""
-    if raw:
-        try:
-            data = json.loads(raw)
-            event = data.get("hook_event_name") or ""
-            session_id = data.get("session_id") or ""
-        except json.JSONDecodeError:
-            pass
-    # CLI override for testing: python -m claude_quota.hook SessionStart
-    if len(sys.argv) > 1:
-        event = sys.argv[1]
-
-    status = quota_status(prefer_exact=True)
-    if status.get("source") != "oauth-exact":
-        # Estimates are too weak to nag about; give a baseline only at start.
-        if event == "SessionStart" and status.get("active_window"):
-            print(f"<quota-guard>Now {_now_str()}. 5h window (local estimate) resets at "
-                  f"{status.get('resets_at')} ({status.get('minutes_remaining')} min). "
-                  f"Exact source unavailable.</quota-guard>")
-        elif event == "UserPromptSubmit" and TIME_ALWAYS:
-            print(f"<now>{_now_str()}</now>")
-        return
-    limits = status.get("limits") or []
-    if not limits:
-        if event == "UserPromptSubmit" and TIME_ALWAYS:
-            print(f"<now>{_now_str()}</now>")
-        return
-
+def _emit_quota(event, session_id, limits, label, suffix=""):
+    """Shared SessionStart/UserPromptSubmit emission for any provider."""
     alerts, opportunity, session = _analyze(limits)
 
     if event == "SessionStart":
-        print(f"<quota-guard>Now {_now_str()}. Usage limits: {_summary_line(limits)}. "
-              f"Plan long-running work around these resets.</quota-guard>")
+        print(f"<quota-guard>Now {_now_str()}. {label}: {_summary_line(limits)}"
+              f"{suffix}. Plan long-running work around these resets.</quota-guard>")
         return
 
     if not alerts and not opportunity:
@@ -182,11 +156,72 @@ def main():
 
     lines = [f"<quota-guard>Now {_now_str()}."]
     for alert in alerts:
-        lines.append(f"LIMIT: {alert}. Pace or checkpoint work accordingly.")
+        lines.append(f"LIMIT: {alert}{suffix}. Pace or checkpoint work accordingly.")
     if opportunity:
         lines.append(f"OPPORTUNITY: {opportunity}")
     lines.append("</quota-guard>")
     print(chr(10).join(lines))
+
+
+def _run_codex(event, session_id):
+    """Codex provider: exact numbers from local rollout logs, no network."""
+    status = codex_quota_status()
+    if not status or not status.get("limits"):
+        if event == "UserPromptSubmit" and TIME_ALWAYS:
+            print(f"<now>{_now_str()}</now>")
+        return
+    age = status.get("snapshot_age_seconds")
+    suffix = ""
+    if isinstance(age, int) and age > 600:
+        suffix = f" (snapshot {_fmt_reset(age // 60)} old)"
+    _emit_quota(event, f"codex-{session_id}", status["limits"],
+                "Codex usage limits", suffix)
+
+
+def main():
+    event = ""
+    session_id = ""
+    provider = (os.environ.get("QUOTA_HOOK_PROVIDER") or "claude").lower()
+    raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    if raw:
+        try:
+            data = json.loads(raw)
+            event = data.get("hook_event_name") or ""
+            session_id = data.get("session_id") or ""
+        except json.JSONDecodeError:
+            pass
+    # CLI overrides for testing/wiring:
+    #   python -m claude_quota.hook SessionStart --provider=codex --time-always
+    global TIME_ALWAYS
+    for arg in sys.argv[1:]:
+        if arg.startswith("--provider="):
+            provider = arg.split("=", 1)[1].lower()
+        elif arg == "--time-always":
+            TIME_ALWAYS = True
+        else:
+            event = arg
+
+    if provider == "codex":
+        _run_codex(event, session_id)
+        return
+
+    status = quota_status(prefer_exact=True)
+    if status.get("source") != "oauth-exact":
+        # Estimates are too weak to nag about; give a baseline only at start.
+        if event == "SessionStart" and status.get("active_window"):
+            print(f"<quota-guard>Now {_now_str()}. 5h window (local estimate) resets at "
+                  f"{status.get('resets_at')} ({status.get('minutes_remaining')} min). "
+                  f"Exact source unavailable.</quota-guard>")
+        elif event == "UserPromptSubmit" and TIME_ALWAYS:
+            print(f"<now>{_now_str()}</now>")
+        return
+    limits = status.get("limits") or []
+    if not limits:
+        if event == "UserPromptSubmit" and TIME_ALWAYS:
+            print(f"<now>{_now_str()}</now>")
+        return
+
+    _emit_quota(event, session_id, limits, "Usage limits")
 
 
 if __name__ == "__main__":
