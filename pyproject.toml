@@ -1,0 +1,24 @@
+[project]
+name = "claude-quota-mcp"
+version = "0.1.0"
+description = "MCP server that lets an AI agent check its own Claude usage limits and plan long-running work around resets."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Pavol" }]
+keywords = ["mcp", "claude", "claude-code", "usage", "quota", "rate-limits", "agents"]
+dependencies = ["mcp>=1.0.0"]
+
+[project.urls]
+Repository = "https://github.com/PavolKum/claude-quota-mcp"
+
+[project.scripts]
+claude-quota-mcp = "claude_quota.server:main"
+claude-quota-hook = "claude_quota.hook:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["claude_quota"]
