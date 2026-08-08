@@ -42,6 +42,14 @@ WARN_PERCENT = float(os.environ.get("QUOTA_HOOK_WARN_PERCENT", "70"))
 OPPORTUNITY_MINUTES = int(os.environ.get("QUOTA_HOOK_OPPORTUNITY_MINUTES", "60"))
 OPPORTUNITY_MAX_PERCENT = float(os.environ.get("QUOTA_HOOK_OPPORTUNITY_MAX_PERCENT", "50"))
 REMIND_MINUTES = int(os.environ.get("QUOTA_HOOK_REMIND_MINUTES", "30"))
+# Reset-bridging tiers for the 5h session window. At BRIDGE_PERCENT the hook
+# starts printing the machine-usable seconds-until-reset alongside the human
+# span; at JUMP_PERCENT it additionally instructs the agent to sleep PAST the
+# reset ("jump over" the window) so a long task resumes after it instead of
+# being force-stopped at 100%. A planned pause that resumes beats a hard stop.
+BRIDGE_PERCENT = float(os.environ.get("QUOTA_HOOK_BRIDGE_PERCENT", "80"))
+JUMP_PERCENT = float(os.environ.get("QUOTA_HOOK_JUMP_PERCENT", "95"))
+JUMP_MARGIN_SECONDS = int(os.environ.get("QUOTA_HOOK_JUMP_MARGIN_SECONDS", "120"))
 # "1": emit a minimal <now> timestamp on every UserPromptSubmit, even when the
 # quota picture doesn't warrant speaking. Default off: time rides along only on
 # lines the hook was going to print anyway.
@@ -76,6 +84,30 @@ def _save_state(session_id, state):
         pass
 
 
+def _seconds_until_reset(lim):
+    """Exact seconds until this window resets, from its ISO stamp.
+
+    Falls back to minute granularity when the stamp is missing/unparseable, so
+    the bridge instruction always carries a usable number.
+    """
+    try:
+        from datetime import datetime, timezone
+        stamp = lim.get("resets_at")
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        seconds = int((when - datetime.now(timezone.utc)).total_seconds())
+        return max(seconds, 0)
+    except Exception:
+        minutes = lim.get("minutes_until_reset")
+        return minutes * 60 if isinstance(minutes, int) else None
+
+
+def _fmt_reset_with_seconds(lim):
+    """'2h 25m (8700s)' - human span plus the number an agent can act on."""
+    human = _fmt_reset(lim.get("minutes_until_reset"))
+    seconds = _seconds_until_reset(lim)
+    return f"{human} ({seconds}s)" if seconds is not None else human
+
+
 def _fmt_reset(minutes):
     if not isinstance(minutes, int):
         return "?"
@@ -99,6 +131,29 @@ def _summary_line(limits):
     return "; ".join(parts)
 
 
+def _bridge_directive(session):
+    """At JUMP_PERCENT, tell the agent to sleep past the reset instead of dying.
+
+    Returns None below the threshold. The weekly window is a separate budget and
+    cannot be bridged this way, so this only ever speaks for the 5h session.
+    """
+    pct = (session or {}).get("percent_used")
+    if not isinstance(pct, (int, float)) or pct < JUMP_PERCENT:
+        return None
+    seconds = _seconds_until_reset(session)
+    if not isinstance(seconds, int) or seconds <= 0:
+        return None
+    sleep_for = seconds + JUMP_MARGIN_SECONDS
+    return (f"5h session at {pct}% -- too close to the wall to start new work. "
+            f"Finish the current unit, checkpoint it (commit, scratchpad note, or a bus "
+            f"post so a peer can see where things stand), then JUMP THE RESET: run a "
+            f"background sleep of {sleep_for}s ({_fmt_reset(sleep_for // 60)}, i.e. the "
+            f"{seconds}s until reset plus {JUMP_MARGIN_SECONDS}s margin) so this turn "
+            f"resumes on the far side of the window. A foreground sleep is blocked -- use "
+            f"Bash with run_in_background, which re-invokes on exit. A planned pause that "
+            f"resumes beats being force-stopped at 100%.")
+
+
 def _analyze(limits):
     """Return (alerts, opportunity, session_limit) for the trigger decision."""
     alerts = []
@@ -109,12 +164,16 @@ def _analyze(limits):
         sev = (lim.get("severity") or "normal").lower()
         if lim.get("kind") == "session":
             session = lim
+        # Past the bridge tier the agent needs a number it can sleep on, not
+        # just a human span.
+        detailed = isinstance(pct, (int, float)) and pct >= BRIDGE_PERCENT
+        reset_text = (_fmt_reset_with_seconds(lim) if detailed
+                      else _fmt_reset(lim.get("minutes_until_reset")))
         if sev != "normal":
             alerts.append(f"{_window_name(lim)} severity is '{sev}' at {pct}%, "
-                          f"resets in {_fmt_reset(lim.get('minutes_until_reset'))}")
+                          f"resets in {reset_text}")
         elif isinstance(pct, (int, float)) and pct >= WARN_PERCENT:
-            alerts.append(f"{_window_name(lim)} at {pct}% used, resets in "
-                          f"{_fmt_reset(lim.get('minutes_until_reset'))}")
+            alerts.append(f"{_window_name(lim)} at {pct}% used, resets in {reset_text}")
     if session:
         pct = session.get("percent_used")
         mins = session.get("minutes_until_reset")
@@ -131,8 +190,10 @@ def _emit_quota(event, session_id, limits, label, suffix=""):
     alerts, opportunity, session = _analyze(limits)
 
     if event == "SessionStart":
+        bridge = _bridge_directive(session)
+        tail = f" BRIDGE: {bridge}" if bridge else ""
         print(f"<quota-guard>Now {_now_str()}. {label}: {_summary_line(limits)}"
-              f"{suffix}. Plan long-running work around these resets.</quota-guard>")
+              f"{suffix}. Plan long-running work around these resets.{tail}</quota-guard>")
         return
 
     if not alerts and not opportunity:
@@ -146,7 +207,11 @@ def _emit_quota(event, session_id, limits, label, suffix=""):
     now = time.time()
     band = int((session or {}).get("percent_used") or 0) // 10
     severities = ",".join(sorted((l.get("severity") or "normal") for l in limits))
-    fingerprint = f"{band}|{severities}|{bool(opportunity)}"
+    # Crossing into the jump tier must break the throttle: 90 and 96 share a
+    # 10-percent band, so without this the bridge instruction could sit unsent
+    # for a full REMIND_MINUTES right when it matters most.
+    bridging = _bridge_directive(session) is not None
+    fingerprint = f"{band}|{severities}|{bool(opportunity)}|{bridging}"
     if (state.get("fingerprint") == fingerprint
             and now - state.get("emitted_at", 0) < REMIND_MINUTES * 60):
         if event == "UserPromptSubmit" and TIME_ALWAYS:
@@ -159,6 +224,9 @@ def _emit_quota(event, session_id, limits, label, suffix=""):
         lines.append(f"LIMIT: {alert}{suffix}. Pace or checkpoint work accordingly.")
     if opportunity:
         lines.append(f"OPPORTUNITY: {opportunity}")
+    bridge = _bridge_directive(session)
+    if bridge:
+        lines.append(f"BRIDGE: {bridge}")
     lines.append("</quota-guard>")
     print(chr(10).join(lines))
 
