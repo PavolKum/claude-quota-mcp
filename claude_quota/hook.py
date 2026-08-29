@@ -44,12 +44,16 @@ OPPORTUNITY_MAX_PERCENT = float(os.environ.get("QUOTA_HOOK_OPPORTUNITY_MAX_PERCE
 REMIND_MINUTES = int(os.environ.get("QUOTA_HOOK_REMIND_MINUTES", "30"))
 # Reset-bridging tiers for the 5h session window. At BRIDGE_PERCENT the hook
 # starts printing the machine-usable seconds-until-reset alongside the human
-# span; at JUMP_PERCENT it additionally instructs the agent to sleep PAST the
-# reset ("jump over" the window) so a long task resumes after it instead of
-# being force-stopped at 100%. A planned pause that resumes beats a hard stop.
+# span; at JUMP_PERCENT it warns that the wall is close and the current unit
+# should be checkpointed.
+#
+# It deliberately does NOT tell the agent to sleep past the reset any more.
+# Claude Code has a native `autoContinueAtUsageLimit` setting that parks the
+# session at the limit and resumes it when the window rolls over. That native
+# wait is cancelled by input and by agent activity, so a hook-driven background
+# sleep does not bridge the gap -- it competes with the thing that already does.
 BRIDGE_PERCENT = float(os.environ.get("QUOTA_HOOK_BRIDGE_PERCENT", "80"))
 JUMP_PERCENT = float(os.environ.get("QUOTA_HOOK_JUMP_PERCENT", "95"))
-JUMP_MARGIN_SECONDS = int(os.environ.get("QUOTA_HOOK_JUMP_MARGIN_SECONDS", "120"))
 # "1": emit a minimal <now> timestamp on every UserPromptSubmit, even when the
 # quota picture doesn't warrant speaking. Default off: time rides along only on
 # lines the hook was going to print anyway.
@@ -132,10 +136,15 @@ def _summary_line(limits):
 
 
 def _bridge_directive(session):
-    """At JUMP_PERCENT, tell the agent to sleep past the reset instead of dying.
+    """At JUMP_PERCENT, warn that the wall is close and the work needs a checkpoint.
 
     Returns None below the threshold. The weekly window is a separate budget and
     cannot be bridged this way, so this only ever speaks for the 5h session.
+
+    This used to hand the agent a sleep-past-the-reset instruction. It no longer
+    does: Claude Code's native `autoContinueAtUsageLimit` owns the waiting, and
+    agent activity cancels that native wait. The hook's job here is to get the
+    current unit to a resumable state before the limit lands, nothing more.
     """
     pct = (session or {}).get("percent_used")
     if not isinstance(pct, (int, float)) or pct < JUMP_PERCENT:
@@ -143,15 +152,12 @@ def _bridge_directive(session):
     seconds = _seconds_until_reset(session)
     if not isinstance(seconds, int) or seconds <= 0:
         return None
-    sleep_for = seconds + JUMP_MARGIN_SECONDS
     return (f"5h session at {pct}% -- too close to the wall to start new work. "
-            f"Finish the current unit, checkpoint it (commit, scratchpad note, or a bus "
-            f"post so a peer can see where things stand), then JUMP THE RESET: run a "
-            f"background sleep of {sleep_for}s ({_fmt_reset(sleep_for // 60)}, i.e. the "
-            f"{seconds}s until reset plus {JUMP_MARGIN_SECONDS}s margin) so this turn "
-            f"resumes on the far side of the window. A foreground sleep is blocked -- use "
-            f"Bash with run_in_background, which re-invokes on exit. A planned pause that "
-            f"resumes beats being force-stopped at 100%.")
+            f"Finish the current unit and checkpoint it (commit, scratchpad note, or a "
+            f"bus post so a peer can see where things stand); reset is {seconds}s away. "
+            f"Do NOT run a background sleep to jump the reset -- Claude Code's native "
+            f"autoContinueAtUsageLimit setting parks the session and resumes it, and "
+            f"agent activity cancels that wait. Leave the resume to it.")
 
 
 def _analyze(limits):
@@ -164,8 +170,8 @@ def _analyze(limits):
         sev = (lim.get("severity") or "normal").lower()
         if lim.get("kind") == "session":
             session = lim
-        # Past the bridge tier the agent needs a number it can sleep on, not
-        # just a human span.
+        # Past the bridge tier the agent needs a concrete number, not just a
+        # human span, to judge whether the current unit still fits.
         detailed = isinstance(pct, (int, float)) and pct >= BRIDGE_PERCENT
         reset_text = (_fmt_reset_with_seconds(lim) if detailed
                       else _fmt_reset(lim.get("minutes_until_reset")))

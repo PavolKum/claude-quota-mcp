@@ -1,16 +1,24 @@
-"""Tests for the quota-guard reset-bridging tiers (80% seconds, 95% jump).
+"""Tests for the quota-guard reset-bridging tiers (80% seconds, 95% checkpoint).
 
 Drives the emitter with synthetic limit dicts so no network or OAuth token is
 involved. Run: python test_hook_bridge.py
 """
 
 import io
+import os
 import re
 import sys
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 
-from claude_quota import hook
+# The hook snapshots QUOTA_HOOK_* env into module constants at import time, so
+# clear them first: these tests assert the shipped defaults, and a developer's
+# own settings.json env (QUOTA_HOOK_WARN_PERCENT=101, TIME_ALWAYS=1, ...) would
+# otherwise silently rewrite the thresholds under test.
+for _key in [k for k in os.environ if k.startswith("QUOTA_HOOK_")]:
+    del os.environ[_key]
+
+from claude_quota import hook  # noqa: E402  (must follow the env scrub)
 
 FAILURES = []
 
@@ -48,18 +56,25 @@ def main():
     check("80%+: reset carries exact seconds", "2h 30m (" in out and "s)" in out, out)
     check("80%+: no jump instruction yet", "BRIDGE" not in out, out)
 
-    # At the jump tier: the sleep-past-reset instruction appears with a number.
+    # At the jump tier: a checkpoint warning with the seconds remaining, and
+    # explicitly NO sleep instruction -- native autoContinueAtUsageLimit owns
+    # the waiting, and agent activity cancels it.
     out = emit([session_limit(96, 150, "critical")])
     check("95%+: emits BRIDGE directive", "BRIDGE:" in out, out)
+    check("95%+: tells the agent to checkpoint", "checkpoint it" in out, out)
     # Allow a couple of seconds of drift: the reset stamp is sub-second precise,
     # so 150 minutes out reads as 8999s rather than a clean 9000s.
-    sleep_match = re.search(r"background sleep of (\d+)s", out)
-    expected = 150 * 60 + hook.JUMP_MARGIN_SECONDS
-    check("95%+: names a concrete sleep duration",
-          bool(sleep_match) and abs(int(sleep_match.group(1)) - expected) <= 3,
-          f"expected ~{expected}s, got {sleep_match.group(1) if sleep_match else 'none'}")
-    check("95%+: says background, not foreground sleep",
-          "run_in_background" in out and "foreground sleep is blocked" in out.lower(), out)
+    secs_match = re.search(r"reset is (\d+)s away", out)
+    expected = 150 * 60
+    check("95%+: names the seconds until reset",
+          bool(secs_match) and abs(int(secs_match.group(1)) - expected) <= 3,
+          f"expected ~{expected}s, got {secs_match.group(1) if secs_match else 'none'}")
+    check("95%+: forbids rather than instructs the reset jump",
+          "Do NOT run a background sleep" in out
+          and "JUMP THE RESET" not in out
+          and not re.search(r"sleep of \d+s", out), out)
+    check("95%+: points at the native setting",
+          "autoContinueAtUsageLimit" in out, out)
 
     # A weekly window alone must never produce a bridge instruction.
     weekly = {"kind": "weekly_all", "percent_used": 99, "severity": "critical",
