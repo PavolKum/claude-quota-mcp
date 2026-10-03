@@ -57,11 +57,13 @@ built on, that estimate said **0.7%** when the real figure was **13%**. Reset
 
 ## Install
 
-Status: **not yet published.** There is no PyPI release and no public
-repository yet; the `uvx` one-liner will appear here once both exist. Until
-then, install from a local clone:
+Source: <https://github.com/PavolKum/claude-quota-mcp>. PyPI release: pending
+(the `uvx claude-quota-mcp` one-liner will appear here once the first release
+is published). Until then install straight from GitHub, or from a local clone:
 
 ```bash
+python -m pip install git+https://github.com/PavolKum/claude-quota-mcp
+# or, inside a clone:
 python -m pip install .
 ```
 
