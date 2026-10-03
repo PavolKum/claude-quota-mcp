@@ -24,9 +24,11 @@ Claude Code settings.json:
     "SessionStart":     [{"hooks": [{"type": "command", "command": "python -m claude_quota.hook"}]}]
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python -m claude_quota.hook"}]}]
 
-Reads hook JSON on stdin (hook_event_name, session_id). The OAuth response is
-disk-cached (180s), so per-prompt frequency costs no extra API calls. Exits 0
-and prints nothing on ANY internal failure -- it must never break the host.
+Reads hook JSON on stdin (hook_event_name, session_id). Quota numbers come
+from the statusline snapshot by default (documented fields, no credential, no
+network); the OAuth endpoint is used only when the host opted in, and its
+response is disk-cached (180s). Exits 0 and prints nothing on ANY internal
+failure -- it must never break the host.
 """
 
 import json
@@ -280,7 +282,7 @@ def main():
         return
 
     status = quota_status(prefer_exact=True)
-    if status.get("source") != "oauth-exact":
+    if status.get("source") not in ("oauth-exact", "statusline-snapshot"):
         # Estimates are too weak to nag about; give a baseline only at start.
         if event == "SessionStart" and status.get("active_window"):
             print(f"<quota-guard>Now {_now_str()}. 5h window (local estimate) resets at "
@@ -295,7 +297,10 @@ def main():
             print(f"<now>{_now_str()}</now>")
         return
 
-    _emit_quota(event, session_id, limits, "Usage limits")
+    suffix = ""
+    if status.get("source") == "statusline-snapshot" and status.get("stale"):
+        suffix = f" (statusline snapshot {_fmt_reset(status.get('snapshot_age_seconds', 0) // 60)} old)"
+    _emit_quota(event, session_id, limits, "Usage limits", suffix)
 
 
 if __name__ == "__main__":

@@ -3,4 +3,4 @@
 from claude_quota.quota import quota_status
 
 __all__ = ["quota_status"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

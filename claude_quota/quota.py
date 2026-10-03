@@ -1,6 +1,11 @@
-"""Core quota logic: exact OAuth source with a local-reconstruction fallback.
+"""Core quota logic: documented statusline snapshot first, OAuth endpoint only on opt-in,
+local reconstruction as the last resort.
 
-Two sources, tried in order:
+Sources, tried in order:
+
+0. SNAPSHOT - the Claude Code statusline payload persisted by claude_quota.statusline.
+   Documented fields (rate_limits.five_hour / seven_day: used_percentage, resets_at),
+   no credential, no network. Account-wide windows only; freshness is reported.
 
 1. EXACT  - Anthropic's OAuth usage endpoint (the same data behind Claude Code's
    /usage command): per-window utilization percent, severity, and reset times for
@@ -8,6 +13,11 @@ Two sources, tried in order:
    The endpoint is undocumented and rate-limits aggressively per token, so
    responses are cached on disk (default 180s TTL) and stale cache is served on
    any failure (including 429) before giving up.
+   OFF BY DEFAULT. Anthropic's Claude Code legal page says the consumer OAuth
+   token is intended exclusively for Claude Code and native Anthropic apps, and
+   the endpoint is undocumented. Enable only knowingly, with
+   CLAUDE_QUOTA_ALLOW_OAUTH_ENDPOINT=1 (or quota_status(allow_oauth=True)).
+   The request identifies itself honestly (User-Agent claude-quota-mcp).
 
 2. ESTIMATE - reconstruction from local Claude Code transcripts
    (~/.claude/projects/**/*.jsonl) using the same "blocks" method as ccusage:
@@ -15,8 +25,9 @@ Two sources, tried in order:
    hour, and lasts 5 hours. Percent is estimated against the largest token total
    observed in one completed historical window on this machine.
 
-Stdlib only. Reads the local Claude Code OAuth token (credentials file, or the
-macOS keychain); never sends it anywhere except api.anthropic.com.
+Stdlib only. When the OAuth source is enabled it reads the local Claude Code
+token (credentials file, or the macOS keychain) and sends it nowhere except
+api.anthropic.com; when disabled the token is never read at all.
 """
 
 import glob
@@ -37,6 +48,11 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA = "oauth-2025-04-20"
 USER_AGENT = "claude-quota-mcp"
 CACHE_TTL_SECONDS = 180  # the endpoint 429s below roughly this polling interval
+
+
+def oauth_endpoint_allowed():
+    """The undocumented endpoint is opt-in; see the module docstring."""
+    return os.environ.get("CLAUDE_QUOTA_ALLOW_OAUTH_ENDPOINT", "") == "1"
 
 
 def _cache_path():
@@ -138,13 +154,16 @@ def _parse_oauth_payload(payload, cache_age_seconds=None):
     return result
 
 
-def oauth_quota_status(max_age_seconds=CACHE_TTL_SECONDS):
+def oauth_quota_status(max_age_seconds=CACHE_TTL_SECONDS, allow=None):
     """Query the OAuth usage endpoint, honoring the disk cache.
 
-    Fresh cache -> served without a network call. Network failure of any kind
-    (including 429) -> stale cache if one exists, else None so callers fall back
-    to the local reconstruction.
+    Returns None without reading any credential unless the source is enabled
+    (allow=True, or CLAUDE_QUOTA_ALLOW_OAUTH_ENDPOINT=1). Fresh cache -> served
+    without a network call. Network failure of any kind (including 429) -> stale
+    cache if one exists, else None so callers fall back.
     """
+    if not (allow if allow is not None else oauth_endpoint_allowed()):
+        return None
     cached = _read_cache()
     now = time.time()
     if cached and (now - cached.get("fetched_at", 0)) < max_age_seconds:
@@ -269,15 +288,26 @@ def reconstruct_quota_status(now=None):
     }
 
 
-def quota_status(prefer_exact=True):
-    """Full quota picture: exact OAuth data when available, estimate otherwise.
+def quota_status(prefer_exact=True, allow_oauth=None):
+    """Full quota picture, best available source first.
 
-    Returns a dict with 'source' set to 'oauth-exact' or 'local-estimate'. When
-    the exact source succeeds, the local reconstruction is attached under
-    'reconstruction' as a cross-check.
+    Order: statusline snapshot (documented, no credential) -> OAuth endpoint
+    (only if enabled) -> local transcript estimate. The result's 'source' is
+    'statusline-snapshot', 'oauth-exact' or 'local-estimate'. Whenever a
+    non-estimate source wins, the reconstruction is attached under
+    'reconstruction' as a cross-check. prefer_exact=False skips both exact
+    sources and returns the estimate alone.
     """
-    exact = oauth_quota_status() if prefer_exact else None
+    from claude_quota.statusline import read_snapshot  # lazy: keeps `python -m claude_quota.statusline` warning-free
+
     recon = reconstruct_quota_status()
+    if not prefer_exact:
+        return recon
+    snapshot = read_snapshot()
+    if snapshot:
+        snapshot["reconstruction"] = recon
+        return snapshot
+    exact = oauth_quota_status(allow=allow_oauth)
     if exact:
         exact["reconstruction"] = recon
         return exact

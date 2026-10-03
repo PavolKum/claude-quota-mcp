@@ -27,9 +27,10 @@ class QuotaInput(BaseModel):
     """Input for quota status."""
     provider: Literal["claude", "codex", "all"] = Field(
         default="all",
-        description="Which agent's limits to check: 'claude' (OAuth exact / "
-                    "transcript estimate), 'codex' (latest server-issued "
-                    "snapshot from local rollout files), or 'all'.",
+        description="Which agent's limits to check: 'claude' (statusline snapshot, "
+                    "or the opt-in OAuth endpoint, or a transcript estimate), "
+                    "'codex' (latest server-issued snapshot from local rollout "
+                    "files), or 'all'.",
     )
     response_format: Literal["markdown", "json"] = Field(
         default="markdown",
@@ -71,6 +72,24 @@ def render_codex_markdown(status):
 
 
 def render_markdown(status):
+    if status["source"] == "statusline-snapshot":
+        lines = ["**Claude usage limits (Claude Code statusline, documented fields):**", "",
+                 "| Window | Used | Resets in | Severity |", "|---|---|---|---|"]
+        for lim in status.get("limits") or []:
+            name = WINDOW_LABELS.get(lim.get("kind"), lim.get("kind") or "?")
+            mins = lim.get("minutes_until_reset")
+            resets = f"{mins // 60}h {mins % 60}m" if isinstance(mins, int) else "?"
+            lines.append(f"| {name} | {lim.get('percent_used', '?')}% "
+                         f"| {resets} | {lim.get('severity', '?')} |")
+        age = status.get("snapshot_age_seconds")
+        if isinstance(age, int):
+            note = f"*Snapshot from the last statusline render {_fmt_age(age)} ago"
+            note += "; STALE, Claude Code has not rendered recently.*" if status.get("stale") else ".*"
+            lines += ["", note]
+        lines += ["", "*Account-wide windows only; per-model weekly windows are not in the "
+                      "documented statusline data.*"]
+        return chr(10).join(lines)
+
     if status["source"] == "oauth-exact":
         lines = ["**Claude usage limits (exact, via OAuth usage endpoint):**", ""]
         limits = status.get("limits") or []
@@ -113,9 +132,11 @@ def render_markdown(status):
     description=(
         "Check the agent's own usage limits so long-running work can be planned "
         "around resets - e.g. if a window resets soon with usage to spare, "
-        "front-load heavy work now. Providers: 'claude' (exact percentages for "
-        "the 5-hour/weekly/per-model windows via Anthropic's OAuth usage "
-        "endpoint, cached 180s, transcript-estimate fallback) and 'codex' "
+        "front-load heavy work now. Providers: 'claude' (5-hour and weekly "
+        "percentages from the documented Claude Code statusline snapshot, no "
+        "credential; the undocumented OAuth usage endpoint only when the host "
+        "opted in via CLAUDE_QUOTA_ALLOW_OAUTH_ENDPOINT=1; transcript-estimate "
+        "fallback) and 'codex' "
         "(latest server-issued rate-limit snapshot from local Codex rollout "
         "logs - exact numbers, freshness = Codex's last activity). Default "
         "'all' reports both."
