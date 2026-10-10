@@ -7,7 +7,7 @@ license = { file = "LICENSE" }
 requires-python = ">=3.10"
 authors = [{ name = "Pavol" }]
 keywords = ["mcp", "claude", "claude-code", "codex", "statusline", "usage", "quota", "rate-limits", "agents"]
-dependencies = ["mcp>=1.0.0", "pydantic>=2.0"]
+dependencies = ["mcp>=1.0.0,<2", "pydantic>=2.0"]
 
 [project.urls]
 Repository = "https://github.com/PavolKum/claude-quota-mcp"
