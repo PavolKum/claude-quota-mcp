@@ -171,6 +171,9 @@ def compact_line(kept):
 
 
 def main():
+    if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
+        print("claude-quota-statusline: reads the Claude Code statusline JSON on stdin, writes the rate-limit snapshot, prints a one-line status. Flags: --quiet (print nothing), --help.")
+        return
     quiet = "--quiet" in sys.argv[1:]
     raw = sys.stdin.read() if not sys.stdin.isatty() else ""
     try:
