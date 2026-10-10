@@ -23,6 +23,7 @@ jobs:
       - run: python -m pip install -e .
       - run: python test_hook_bridge.py
       - run: python test_statusline.py
+      - run: python test_server_smoke.py
 
   build:
     needs: test

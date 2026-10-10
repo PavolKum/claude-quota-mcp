@@ -7,7 +7,6 @@ Transport: stdio. One tool, tiny schema footprint by design.
 from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field
 
 from claude_quota.codex import codex_quota_status
 from claude_quota.quota import quota_status
@@ -21,21 +20,6 @@ WINDOW_LABELS = {
     "primary": "Primary window",
     "secondary": "Secondary window",
 }
-
-
-class QuotaInput(BaseModel):
-    """Input for quota status."""
-    provider: Literal["claude", "codex", "all"] = Field(
-        default="all",
-        description="Which agent's limits to check: 'claude' (statusline snapshot, "
-                    "or the opt-in OAuth endpoint, or a transcript estimate), "
-                    "'codex' (latest server-issued snapshot from local rollout "
-                    "files), or 'all'.",
-    )
-    response_format: Literal["markdown", "json"] = Field(
-        default="markdown",
-        description="Output format: 'markdown' or 'json'.",
-    )
 
 
 def _fmt_age(seconds):
@@ -142,20 +126,32 @@ def render_markdown(status):
         "'all' reports both."
     ),
 )
-async def quota_status_tool(params: QuotaInput) -> str:
-    claude = quota_status() if params.provider in ("claude", "all") else None
-    codex = codex_quota_status() if params.provider in ("codex", "all") else None
-    if params.response_format == "json":
+async def quota_status_tool(
+    provider: Literal["claude", "codex", "all"] = "all",
+    response_format: Literal["markdown", "json"] = "markdown",
+) -> str:
+    """provider: 'claude' (statusline snapshot, or the opt-in OAuth endpoint,
+    or a transcript estimate), 'codex' (latest server-issued snapshot from
+    local rollout files), or 'all'. response_format: 'markdown' or 'json'.
+    """
+    # Arguments are top-level on purpose. A pydantic model argument made the
+    # schema `{"params": {...}}`, and a fresh agent calling
+    # quota_status(provider="all") got a validation error (first-call test,
+    # 2026-10-10). Plain Literal defaults: FastMCP 1.x could not evaluate an
+    # Annotated/Field form (caught by test_server_smoke.py).
+    claude = quota_status() if provider in ("claude", "all") else None
+    codex = codex_quota_status() if provider in ("codex", "all") else None
+    if response_format == "json":
         import json
-        if params.provider == "claude":
+        if provider == "claude":
             return json.dumps(claude, indent=2)
-        if params.provider == "codex":
+        if provider == "codex":
             return json.dumps(codex, indent=2)
         return json.dumps({"claude": claude, "codex": codex}, indent=2)
     parts = []
     if claude is not None:
         parts.append(render_markdown(claude))
-    if params.provider in ("codex", "all"):
+    if provider in ("codex", "all"):
         parts.append(render_codex_markdown(codex))
     return (chr(10) + chr(10)).join(parts)
 
