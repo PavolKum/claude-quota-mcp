@@ -1,6 +1,6 @@
 [project]
 name = "claude-quota-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "MCP server that lets an AI agent check its own Claude usage limits and plan long-running work around resets."
 readme = "README.md"
 license = { file = "LICENSE" }
